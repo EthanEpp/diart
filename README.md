@@ -284,21 +284,27 @@ Obtain overlap-aware speaker embeddings from a microphone stream:
 ```python
 import rx.operators as ops
 import diart.operators as dops
-from diart.sources import MicrophoneAudioSource
+from diart.sources import MicrophoneAudioSource, FileAudioSource
 from diart.blocks import SpeakerSegmentation, OverlapAwareSpeakerEmbedding
 
 segmentation = SpeakerSegmentation.from_pretrained("pyannote/segmentation")
 embedding = OverlapAwareSpeakerEmbedding.from_pretrained("pyannote/embedding")
-mic = MicrophoneAudioSource()
+
+source = MicrophoneAudioSource()
+# To take input from file:
+# source = FileAudioSource("<filename>", sample_rate=16000)
+
+# Make sure the models have been trained with this sample rate
+print(source.sample_rate)
 
 stream = mic.stream.pipe(
     # Reformat stream to 5s duration and 500ms shift
-    dops.rearrange_audio_stream(sample_rate=segmentation.model.sample_rate),
+    dops.rearrange_audio_stream(sample_rate=source.sample_rate),
     ops.map(lambda wav: (wav, segmentation(wav))),
     ops.starmap(embedding)
 ).subscribe(on_next=lambda emb: print(emb.shape))
 
-mic.read()
+source.read()
 ```
 
 Output:
