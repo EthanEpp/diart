@@ -187,6 +187,9 @@ class SpeakerDiarization(base.Pipeline):
         # embeddings has shape (batch, speakers, emb_dim)
         embeddings = self.embedding(batch, segmentations)
 
+        print("▶ CHUNK WAVEFORM SHAPE:", batch.shape)
+        weights = self.embedding.osp(segmentations)
+        print("▶ WEIGHTS SHAPE:", weights.shape)  
         seg_resolution = waveforms[0].extent.duration / segmentations.shape[1]
 
         outputs = []

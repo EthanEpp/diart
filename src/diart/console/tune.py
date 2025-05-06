@@ -89,6 +89,13 @@ def run():
         help=f"{argdoc.CPU}. Defaults to GPU if available, CPU otherwise",
     )
     parser.add_argument(
+        "--mps",
+        dest="mps",
+        action="store_true",
+        help="Use Apple MPS backend if available",
+    )
+
+    parser.add_argument(
         "--hparams",
         nargs="+",
         default=("tau_active", "rho_update", "delta_new"),
@@ -117,7 +124,14 @@ def run():
     args = parser.parse_args()
 
     # Resolve device
-    args.device = torch.device("cpu") if args.cpu else None
+    if args.cpu:
+        args.device = torch.device("cpu")
+
+    elif args.mps and torch.backends.mps.is_available():
+        args.device = torch.device("mps")
+    else:
+        # fallback to CUDA if available, otherwise CPU
+        args.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
     # Resolve models
     hf_token = utils.parse_hf_token_arg(args.hf_token)

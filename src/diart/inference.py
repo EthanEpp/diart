@@ -71,7 +71,6 @@ class StreamingInference:
         self.accumulator = PredictionAccumulator(self.source.uri)
         self.unit = "chunk" if self.batch_size == 1 else "batch"
         self._observers = []
-
         chunk_duration = self.pipeline.config.duration
         step_duration = self.pipeline.config.step
         sample_rate = self.pipeline.config.sample_rate
