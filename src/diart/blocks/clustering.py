@@ -44,7 +44,9 @@ class OnlineSpeakerClustering:
         self.centers: Optional[np.ndarray] = None
         self.active_centers = set()
         self.blocked_centers = set()
-
+        self.initial_embeddings: Optional[np.ndarray] = None
+        self.index_to_name = {}
+        
     @property
     def num_free_centers(self) -> int:
         return self.max_speakers - self.num_known_speakers - self.num_blocked_speakers
@@ -81,6 +83,22 @@ class OnlineSpeakerClustering:
         self.centers = np.zeros((self.max_speakers, dimension))
         self.active_centers = set()
         self.blocked_centers = set()
+
+        if self.initial_embeddings is not None:
+            n_known, d = self.initial_embeddings.shape
+            if n_known > self.max_speakers:
+                raise ValueError(
+                    f"initial_embeddings has {n_known} rows but max_speakers is {self.max_speakers}"
+                )
+            assert d == dimension, "Embedding dimension mismatch"
+            # Seed the first n_known rows:
+            self.centers[:n_known] = self.initial_embeddings
+            # Mark them as active:
+            self.active_centers.update(range(n_known))
+            # NEW: store the names
+            for idx, name in enumerate(self.initial_speaker_names):
+                if idx < n_known:
+                    self.index_to_name[idx] = name
 
     def update(self, assignments: Iterable[Tuple[int, int]], embeddings: np.ndarray):
         """Updates the speaker centroids given a list of assignments and local speaker embeddings

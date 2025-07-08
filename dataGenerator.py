@@ -8,7 +8,7 @@ from pydub import AudioSegment
 UTTERANCE_ROOT      = Path("/Users/SAI/Documents/Code/diart/biometricsCalibration_04_01_trimmed/64inches")
 SILENCE_ROOT        = Path("/Users/SAI/Documents/Code/diart/biometricsCalibration_04_01_trimmed/silence")
 OUTPUT_ROOT         = Path("/Users/SAI/Documents/Code/diart/dataLabels")
-NUM_SAMPLES         = 50
+NUM_SAMPLES         = 1000
 SEED                = 42
 SILENCE_TARGET_DBFS = -65.0
 # ───────────────────────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ def generate_samples(utterances: dict, silences: dict, num_samples: int, seed: i
         utt2 = random.choice(utterances[stype][user2])
 
         # decide silences
-        begin_sec  = random.choice([4])
+        begin_sec  = random.choice([0,1,2,3,4])
         middle_sec = random.choice([0, 1, 2, 3, 4])
         after_sec  = random.choice([0, 1])
 

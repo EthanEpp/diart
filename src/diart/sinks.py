@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Union, Text, Optional, Tuple
-
+import numpy as np
 import matplotlib.pyplot as plt
 from pyannote.core import Annotation, Segment, SlidingWindowFeature, notebook
 from pyannote.database.util import load_rttm
@@ -54,6 +54,200 @@ class RTTMWriter(Observer):
 
     def on_completed(self):
         self.patch()
+
+
+
+class ConsoleWriterNoId(Observer):
+    """Print each detected speaker segment to the console as it arrives."""
+    def __init__(self, uri: Optional[Text] = None):
+        super().__init__()
+        self.uri = uri
+
+    def on_next(self, value):
+        # value can be (Annotation, …) or an Annotation directly
+        annotation = _extract_prediction(value)
+        annotation.uri = self.uri or annotation.uri
+
+        # Iterate over each (segment, track, label)
+        for segment, _, label in annotation.itertracks(yield_label=True):
+            print(f"[{annotation.uri}] {segment.start:.3f}–{segment.end:.3f}: {label}")
+
+    def on_error(self, error: Exception):
+        print(f"[{self.uri}] ERROR: {error}")
+
+    def on_completed(self):
+        print(f"[{self.uri}] Completed.")
+
+class ConsoleWriter(Observer):
+    """Print each detected segment or silence to the console with human names."""
+    def __init__(
+        self,
+        uri: Optional[str] = None,
+        speaker_names: Optional[list[str]] = None,
+    ):
+        super().__init__()
+        self.uri = uri or ""
+        self.speaker_names = speaker_names or []
+
+    def _map_label(self, label: str|int) -> str:
+        s = str(label)
+        if s.startswith("speaker"):
+            idx = int(s[len("speaker"):])
+        else:
+            idx = int(s)
+        return self.speaker_names[idx] if 0 <= idx < len(self.speaker_names) else s
+
+    def on_next(self, value):
+        # value is either (Annotation, SlidingWindowFeature) or Annotation
+        if isinstance(value, tuple) and len(value) == 2:
+            annotation, waveform = value
+            # get the time‐window for this chunk:
+            sw = waveform.sliding_window
+            start, end = sw.start, sw.start + sw.duration
+        else:
+            annotation = _extract_prediction(value)
+            start = end = None
+
+        # pull out just the *new* segments in this callback
+        segments = list(annotation.itertracks(yield_label=True))
+
+        if not segments:
+            # no speaker detected in this window
+            if start is not None:
+                print(f"[{self.uri}] {start:.3f}–{end:.3f}: <silence>")
+            else:
+                print(f"[{self.uri}] <silence>")
+        else:
+            for segment, _, label in segments:
+                name = self._map_label(label)
+                print(f"[{self.uri}] {segment.start:.3f}–{segment.end:.3f}: {name}")
+
+    def on_error(self, error: Exception):
+        print(f"[{self.uri}] ERROR: {error}")
+
+    def on_completed(self):
+        print(f"[{self.uri}] Completed.")
+
+class SilenceWindowObserver(Observer):
+    """
+    Buffers audio and closes the window when silence is detected after an initial warm-up.
+
+    - Waits `warmup_duration` seconds before starting silence detection.
+    - Detects `silence_threshold` seconds of continuous silence (no active speaker segments).
+    - Writes each closed window to a WAV file in `output_dir`.
+    - If `verbose` is True, prints debug logs.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        silence_threshold: float,
+        output_dir: str,
+        base_filename: str = "window",
+        warmup_duration: float = 0.0,
+        verbose: bool = False,
+    ):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self.silence_threshold = silence_threshold
+        self.warmup_duration = warmup_duration
+        self.output_dir = output_dir
+        self.base = base_filename
+        self.verbose = verbose
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.window_count = 0
+        self.reset()
+
+    def log(self, *args, **kwargs):
+        if self.verbose:
+            print(*args, **kwargs)
+
+    def reset(self):
+        self.log("[DEBUG] Resetting buffer, silence counter, elapsed time")
+        self.buffer = np.array([], dtype=np.float32)
+        self.silence_duration = 0.0
+        self.elapsed_time = 0.0
+
+    def on_next(self, value):
+        # value: (Annotation, SlidingWindowFeature) or (Annotation, SlidingWindowFeature, real_time)
+        if isinstance(value, tuple):
+            if len(value) == 3:
+                annotation, waveform, _ = value
+            elif len(value) == 2:
+                annotation, waveform = value
+            else:
+                self.log(f"[DEBUG] Unsupported tuple length: {len(value)}")
+                return
+        else:
+            self.log(f"[DEBUG] Unsupported value type: {type(value)}")
+            return
+
+        audio = waveform.data.flatten()
+        frame_duration = len(audio) / self.sample_rate
+
+        # Update elapsed time
+        self.elapsed_time += frame_duration
+        self.log(f"[DEBUG] Elapsed time: {self.elapsed_time:.3f}s (warm-up: {self.warmup_duration:.3f}s)")
+
+        # Always accumulate audio
+        self.buffer = np.concatenate([self.buffer, audio])
+        self.log(f"[DEBUG] Buffer length (samples): {len(self.buffer)}")
+
+        # Skip silence detection until warm-up is done
+        if self.elapsed_time < self.warmup_duration:
+            self.log("[DEBUG] Warm-up phase; skipping silence detection")
+            return
+
+        # Count active segments (speech)
+        tracks_count = len(list(annotation.itertracks(yield_label=True)))
+        self.log(f"[DEBUG] frame_dur={frame_duration:.3f}s, tracks={tracks_count}")
+
+        if tracks_count > 0:
+            self.log("[DEBUG] Speech detected; resetting silence counter")
+            self.silence_duration = 0.0
+        else:
+            self.silence_duration += frame_duration
+            self.log(f"[DEBUG] Silence running total: {self.silence_duration:.3f}s")
+
+        # Close window on silence threshold
+        if self.silence_duration >= self.silence_threshold:
+            self.window_count += 1
+            fname = f"{self.base}_{self.window_count:03d}.wav"
+            path = os.path.join(self.output_dir, fname)
+            self.log(f"[DEBUG] Silence threshold reached; writing window #{self.window_count} to {path}")
+            self._write_wav(path, self.buffer)
+            self.reset()
+            raise WindowClosedException(
+                f"Wrote silence window #{self.window_count} to {path}"
+            )
+
+    def on_error(self, error: Exception):
+        self.log(f"[DEBUG] Observer encountered error: {error}")
+        if len(self.buffer) > 0:
+            err_path = os.path.join(self.output_dir, f"{self.base}_err.wav")
+            self.log(f"[DEBUG] Writing remaining buffer to {err_path} before error")
+            self._write_wav(err_path, self.buffer)
+
+    def on_completed(self):
+        self.log(f"[DEBUG] Stream completed; flushing buffer if any")
+        if len(self.buffer) > 0:
+            self.window_count += 1
+            fname = f"{self.base}_{self.window_count:03d}.wav"
+            path = os.path.join(self.output_dir, fname)
+            self.log(f"[DEBUG] Writing final buffer to {path}")
+            self._write_wav(path, self.buffer)
+
+    def _write_wav(self, path: str, buffer: np.ndarray):
+        samples = (buffer * 32767).astype(np.int16)
+        self.log(f"[DEBUG] _write_wav: writing {len(samples)} samples to {path}")
+        with wave.open(path, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self.sample_rate)
+            wf.writeframes(samples.tobytes())
+        self.log(f"[DEBUG] Wrote WAV file: {path}")
+
 
 
 class PredictionAccumulator(Observer):

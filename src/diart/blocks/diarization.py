@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Sequence, Optional
 
 import numpy as np
 import torch
@@ -35,6 +35,9 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
         normalize_embedding_weights: bool = False,
         device: torch.device | None = None,
         sample_rate: int = 16000,
+        *,
+        initial_embeddings: Optional[np.ndarray] = None,
+        initial_speaker_names: Optional[list[str]] = None,
         **kwargs,
     ):
         # Default segmentation model is pyannote/segmentation
@@ -64,10 +67,21 @@ class SpeakerDiarizationConfig(base.PipelineConfig):
         self.gamma = gamma
         self.beta = beta
         self.max_speakers = max_speakers
+        # Validate that we don’t seed more centroids than slots available
+        if initial_embeddings is not None:
+            n_known, dim = initial_embeddings.shape
+            if n_known > max_speakers:
+                raise ValueError(
+                    f"Too many initial_embeddings: got {n_known}, "
+                    f"but max_speakers={max_speakers}"
+                )
+        self.initial_embeddings = initial_embeddings
+        self.initial_speaker_names = initial_speaker_names or []
         self.normalize_embedding_weights = normalize_embedding_weights
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
+
 
     @property
     def duration(self) -> float:
@@ -152,6 +166,8 @@ class SpeakerDiarization(base.Pipeline):
             "cosine",
             self.config.max_speakers,
         )
+        self.clustering.initial_embeddings    = self.config.initial_embeddings
+        self.clustering.initial_speaker_names = self.config.initial_speaker_names
         self.chunk_buffer, self.pred_buffer = [], []
 
     def __call__(
@@ -187,9 +203,9 @@ class SpeakerDiarization(base.Pipeline):
         # embeddings has shape (batch, speakers, emb_dim)
         embeddings = self.embedding(batch, segmentations)
 
-        print("▶ CHUNK WAVEFORM SHAPE:", batch.shape)
+        # print("▶ CHUNK WAVEFORM SHAPE:", batch.shape)
         weights = self.embedding.osp(segmentations)
-        print("▶ WEIGHTS SHAPE:", weights.shape)  
+        # print("▶ WEIGHTS SHAPE:", weights.shape)  
         seg_resolution = waveforms[0].extent.duration / segmentations.shape[1]
 
         outputs = []

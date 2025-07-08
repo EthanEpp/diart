@@ -47,6 +47,59 @@ class AudioSource(ABC):
         pass
 
 
+class ArecordAudioSource(AudioSource):
+    """Audio source using `arecord` subprocess for custom ALSA paths."""
+    def __init__(self,
+                 device: str,
+                 sample_rate: int = 16000,
+                 block_duration: float = 0.5):
+        uri = f"arecord:{device}"
+        super().__init__(uri, sample_rate)
+        # number of frames per chunk
+        self.block_size = int(block_duration * sample_rate)
+        # fire up arecord
+        cmd = [
+            "arecord",
+            "-D", device,
+            "-r", str(sample_rate),
+            "-c", "1",
+            "-f", "S16_LE",
+            "-t", "raw"
+        ]
+        self._proc = subprocess.Popen(cmd,
+                                      stdout=subprocess.PIPE,
+                                      bufsize=self.block_size * 2)
+        self.is_closed = False
+
+    @property
+    def duration(self):
+        # streaming, so unknown
+        return None
+
+    def read(self):
+        """Read raw PCM, convert to float32 [-1,1], and push to the stream."""
+        try:
+            while not self.is_closed:
+                raw = self._proc.stdout.read(self.block_size * 2)
+                if not raw:
+                    break
+                # int16 → float32 in [-1,1]
+                audio = (np.frombuffer(raw, dtype=np.int16)
+                             .astype(np.float32) / 32768.0)
+                # make (channel, samples) shape
+                chunk = audio[np.newaxis, :]
+                self.stream.on_next(chunk)
+        except Exception as e:
+            self.stream.on_error(e)
+        finally:
+            self.stream.on_completed()
+            self.close()
+
+    def close(self):
+        self.is_closed = True
+        if self._proc.poll() is None:
+            self._proc.terminate()
+
 class FileAudioSource(AudioSource):
     """Represents an audio source tied to a file.
 

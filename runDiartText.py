@@ -32,13 +32,18 @@ STEP         = 0.5
 LATENCY      = 0.5
 TAU_ACTIVE   = 0.527
 RHO_UPDATE   = 0.1
-DELTA_NEW    = 0.432
+DELTA_NEW    = 0.8
 GAMMA        = 3
 BETA         = 10
-MAX_SPEAKERS = 2
+MAX_SPEAKERS = 10
 USE_CPU      = False
-
+speaker_ids_global = json.load(open("/Users/SAI/Documents/Code/diart/embeddings/speaker_ids.json"))
+# best_perf=27.1, best_tau_active=0.536, best_rho_update=0.0307, best_delta_new=0.73
 # best_perf=27.1, best_tau_active=0.536, best_rho_update=0.0307, best_delta_new=0.731
+# best_rho_update=0.261, best_delta_new=1.48
+#  best_perf=27, best_rho_update=0.195, best_delta_new=1.15
+# best_perf=27, best_rho_update=0.173, best_delta_new=1.34
+# best_perf=27, best_rho_update=0.155, best_delta_new=1.34
 # warnings.filterwarnings("ignore", message="Mismatch between frames*", category=UserWarning)
 
 # ───── DEVICE & PIPELINE SETUP ─────────────────────────────────────────────────
@@ -61,6 +66,8 @@ def setup_pipeline():
 
     # embedding    = m.EmbeddingModel.from_pretrained(EMBEDDING_NAME, hf_token).to(device)
     embedding = (m.EmbeddingModel.from_onnx(EMBEDDING_NAME_ONNX, input_names=["waveform","weights"], output_name="embedding").to(device))
+    centroids   = np.load("/Users/SAI/Documents/Code/diart/embeddings/initial_centroids.npy")
+    speaker_ids = json.load(open("/Users/SAI/Documents/Code/diart/embeddings/speaker_ids.json"))
 
     pipeline_class = utils.get_pipeline_class(PIPELINE_NAME)
     config = pipeline_class.get_config_class()(
@@ -77,6 +84,8 @@ def setup_pipeline():
         max_speakers=MAX_SPEAKERS,
         device=device,
         no_plot=True,
+        initial_embeddings=centroids,
+        initial_speaker_names=speaker_ids,
     )
     return pipeline_class(config)
 
@@ -137,7 +146,6 @@ def evaluate_diarization(true_segs, pred_segs):
     return metrics, overlaps, true_durations
 
 # ───── PLOTTING ────────────────────────────────────────────────────────────────
-
 
 def plot_diarization(wav_path: Path, rttm_path: Path, plot_out: Path):
     # 1) load audio
@@ -208,6 +216,91 @@ def plot_diarization(wav_path: Path, rttm_path: Path, plot_out: Path):
     plt.close(fig)
 
 
+def plot_diarization_ids(
+    wav_path: Path,
+    rttm_path: Path,
+    plot_out: Path,
+    speaker_ids: list[str]  # ← pass in your loaded names here
+):
+    # 1) load audio
+    with wave.open(str(wav_path), 'rb') as wf:
+        sr = wf.getframerate()
+        n_frames = wf.getnframes()
+        duration = n_frames / sr
+        audio = wf.readframes(n_frames)
+        samples = np.frombuffer(audio, dtype=np.int16)
+        times = np.linspace(0, duration, len(samples))
+
+    # 2) parse predicted RTTM
+    pred_segments = parse_rttm(rttm_path)
+    # labels in the RTTM are strings like "speaker0", "speaker1", …
+    pred_labels = sorted(pred_segments.keys())
+
+    # map each "speaker{idx}" → your actual name (or fallback label)
+    mapped_labels = []
+    for lbl in pred_labels:
+        idx = int(lbl.replace("speaker", ""))
+        if idx < len(speaker_ids):
+            mapped_labels.append(speaker_ids[idx])
+        else:
+            mapped_labels.append(f"new_speaker_{idx}")
+
+    # 3) load true segments (unchanged)
+    case = wav_path.parent.parent.name
+    true_json = LABEL_ROOT / case / 'json' / f"{wav_path.stem}.json"
+    with open(true_json) as jf:
+        true_data = json.load(jf)
+    true_speakers = sorted({seg["speaker"] for seg in true_data["segments"]})
+
+    # 4) make figure
+    fig, (ax0, ax1) = plt.subplots(
+        2, 1, figsize=(10, 4), sharex=True,
+        gridspec_kw={'height_ratios': [1, 2]}
+    )
+
+    # 5) shade true regions (unchanged)
+    patches = []
+    for idx, spk in enumerate(true_speakers):
+        color = f"C{idx}"
+        patches.append(mpatches.Patch(facecolor=color, alpha=0.2, label=spk))
+        for seg in true_data["segments"]:
+            if seg["speaker"] == spk:
+                ax0.axvspan(seg["start"], seg["end"],
+                            facecolor=color, alpha=0.2,
+                            label="_nolegend_")
+
+    # 6) plot predicted lines
+    for idx, lbl in enumerate(pred_labels):
+        for (start, end) in pred_segments[lbl]:
+            ax0.hlines(idx, start, end, linewidth=6)
+
+    # 7) replace y-tick labels with your mapped names
+    ax0.set_yticks(range(len(pred_labels)))
+    ax0.set_yticklabels(mapped_labels)
+    ax0.set_xlim(0, duration)
+    ax0.set_ylabel('Predicted speakers')
+
+    # 8) true-speaker legend (unchanged)
+    ax0.legend(
+        handles=patches,
+        title="True speakers",
+        bbox_to_anchor=(1.02, 1),
+        loc='upper left',
+        borderaxespad=0
+    )
+
+    # 9) waveform (unchanged)
+    ax1.plot(times, samples)
+    ax1.set_xlim(0, duration)
+    ax1.set_ylabel('Amplitude')
+    ax1.set_xlabel('Time (s)')
+
+    fig.tight_layout()
+    plot_out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(plot_out, bbox_inches='tight')
+    plt.close(fig)
+
+
 
 def diarize_file(pipeline, wav_path: Path, rttm_out: Path, plot_out: Path):
     padding = pipeline.config.get_file_padding(wav_path)
@@ -226,7 +319,8 @@ def diarize_file(pipeline, wav_path: Path, rttm_out: Path, plot_out: Path):
     inference.attach_observers(RTTMWriter(source.uri, str(rttm_out)))
     inference()
     # After writing RTTM, generate custom plot
-    plot_diarization(wav_path, rttm_out, plot_out)
+    # plot_diarization(wav_path, rttm_out, plot_out)
+    plot_diarization_ids(wav_path, rttm_out, plot_out, speaker_ids=speaker_ids_global)
 
 
 # ───── MAIN LOOP + AGGREGATION ─────────────────────────────────────────────────
